@@ -197,13 +197,26 @@ async def generate_and_send(
             log.debug("Appended length-nudge for message from %s (%d chars).",
                       reply_to.author.display_name, len(reply_to.content))
 
-        payload = {
+        # When thinking is disabled, patch the system prompt with the /no_think
+        # suffix that Qwen3's chat template recognises, and pass
+        # chat_template_kwargs so newer llama.cpp builds also suppress reasoning.
+        # Without this, the model spends its entire max_tokens budget on <think>
+        # blocks and returns an empty content field.
+        if not LLM_ENABLE_THINKING and messages and messages[0]["role"] == "system":
+            if not messages[0]["content"].rstrip().endswith("/no_think"):
+                messages[0] = {
+                    "role": "system",
+                    "content": messages[0]["content"].rstrip() + "\n/no_think",
+                }
+
+        payload: dict = {
             "model":       LLM_MODEL,
             "messages":    messages,
             "max_tokens":  LLM_MAX_TOKENS,
             "temperature": LLM_TEMPERATURE,
-            "thinking":    LLM_ENABLE_THINKING,
         }
+        if not LLM_ENABLE_THINKING:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         log.debug("Payload: model=%s, messages=%d, max_tokens=%d, temperature=%.2f",
                   LLM_MODEL, len(messages), LLM_MAX_TOKENS, LLM_TEMPERATURE)
