@@ -103,10 +103,17 @@ is_generating: bool = False
 #  CORE LLM ROUTINE
 # ──────────────────────────────────────────────
 
-async def generate_and_send(channel: discord.TextChannel, reason: str) -> None:
+async def generate_and_send(
+    channel: discord.TextChannel,
+    reason: str,
+    reply_to: discord.Message | None = None,
+) -> None:
     """
     Fetch recent channel history, build an OpenAI-schema prompt,
     POST it to the local llama.cpp server, then send the reply.
+
+    If reply_to is provided, the bot replies directly to that message
+    and appends a focused prompt nudge so the LLM addresses it specifically.
 
     This coroutine is always launched via asyncio.create_task() so it
     never blocks the main event loop / Discord heartbeat.
@@ -152,6 +159,18 @@ async def generate_and_send(channel: discord.TextChannel, reason: str) -> None:
             log.warning("No usable message content found; skipping generation.")
             return
 
+        # When triggered by a long message, append a nudge as the final entry
+        # so the LLM focuses its reply on that specific message rather than
+        # producing a generic observation about the whole conversation.
+        if reply_to is not None:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[The last message from {reply_to.author.display_name} was "
+                    f"unusually long. React to it specifically and concisely.]"
+                ),
+            })
+
         payload = {
             "model":       LLM_MODEL,
             "messages":    messages,
@@ -178,7 +197,10 @@ async def generate_and_send(channel: discord.TextChannel, reason: str) -> None:
             return
 
         log.info("Sending reply (%d chars).", len(reply_text))
-        await channel.send(reply_text)
+        if reply_to is not None:
+            await reply_to.reply(reply_text)
+        else:
+            await channel.send(reply_text)
 
     except httpx.HTTPStatusError as exc:
         log.error("llama.cpp HTTP error %s: %s", exc.response.status_code, exc)
@@ -206,9 +228,13 @@ async def on_ready() -> None:
 
     # Start the background silence-check loop now that we have a valid session.
     # Guard against accidental double-start (e.g. reconnects).
-    if not silence_check.is_running():
-        silence_check.start()
-        log.info("Silence-breaker loop started (polls every 5 minutes).")
+    # Set SILENCE_TRIGGER_MINUTES=0 in .env to disable this feature entirely.
+    if SILENCE_TRIGGER_MINUTES > 0:
+        if not silence_check.is_running():
+            silence_check.start()
+            log.info("Silence-breaker loop started (polls every 5 minutes).")
+    else:
+        log.info("Silence-breaker disabled (SILENCE_TRIGGER_MINUTES=0).")
 
 
 @bot.event
@@ -245,7 +271,7 @@ async def on_message(message: discord.Message) -> None:
         log.info("Length trigger fired (%d chars).", len(message.content))
         message_counter = 0   # reset counter on any non-volume trigger
         asyncio.create_task(
-            generate_and_send(message.channel, reason="length-detector")
+            generate_and_send(message.channel, reason="length-detector", reply_to=message)
         )
         return  # skip volume check this cycle
 

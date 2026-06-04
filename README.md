@@ -49,7 +49,7 @@ All configuration is driven by environment variables. Set them in `.env` (copy f
 | `HISTORY_LIMIT` | `40` | How many recent messages to pull as context per generation |
 | `VOLUME_TRIGGER_N` | `40` | Fire after every N messages. **Set to `200` here to change the threshold** |
 | `LENGTH_TRIGGER_CHARS` | `300` | Fire immediately if a single message exceeds this character count |
-| `SILENCE_TRIGGER_MINUTES` | `60` | Fire if the channel has been quiet for this many minutes |
+| `SILENCE_TRIGGER_MINUTES` | `60` | Fire if the channel has been quiet for this many minutes. Set to `0` to disable |
 | `LLM_MODEL` | `local-model` | Model name in the API payload. Ignored by llama.cpp; set to `gpt-4o` etc. for hosted APIs |
 | `LLM_MAX_TOKENS` | `256` | Max tokens the LLM generates per response |
 | `LLM_TEMPERATURE` | `0.85` | Sampling temperature |
@@ -83,7 +83,7 @@ Three independent conditions can fire a generation. All three share one concurre
 
 **Length detector** — fires immediately when a single message exceeds `LENGTH_TRIGGER_CHARS`. Resets the volume counter.
 
-**Silence breaker** — a background task polls every 5 minutes. If `SILENCE_TRIGGER_MINUTES` have passed since the last message, it fires once and re-arms itself.
+**Silence breaker** — a background task polls every 5 minutes. If `SILENCE_TRIGGER_MINUTES` have passed since the last message, it fires once and re-arms itself. Set `SILENCE_TRIGGER_MINUTES=0` to disable it completely.
 
 ---
 
