@@ -54,6 +54,11 @@ LLM_MODEL            = os.getenv("LLM_MODEL", "local-model")
 LLM_MAX_TOKENS       = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE      = float(os.getenv("LLM_TEMPERATURE", "0.85"))
 
+# Thinking/reasoning mode for models that support it (e.g. Qwen3 thinking variants).
+# Disable this for models that have thinking baked in — otherwise the model spends
+# all of max_tokens on <think> reasoning and returns an empty content field.
+LLM_ENABLE_THINKING  = os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
+
 # HTTP timeout for LLM requests.
 # Connect timeout is kept short (fast failure when the server is unreachable).
 # Read timeout must accommodate slow CPU inference: a 1 k-token response at
@@ -197,6 +202,7 @@ async def generate_and_send(
             "messages":    messages,
             "max_tokens":  LLM_MAX_TOKENS,
             "temperature": LLM_TEMPERATURE,
+            "thinking":    LLM_ENABLE_THINKING,
         }
 
         log.debug("Payload: model=%s, messages=%d, max_tokens=%d, temperature=%.2f",
@@ -305,8 +311,8 @@ async def on_ready() -> None:
     """Called once the bot has connected and its internal cache is ready."""
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     log.info("Watching channel ID: %s", TARGET_CHANNEL_ID)
-    log.info("Config — LLM: url=%s model=%s max_tokens=%d temperature=%.2f history=%d",
-             LLAMACPP_URL, LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE, HISTORY_LIMIT)
+    log.info("Config — LLM: url=%s model=%s max_tokens=%d temperature=%.2f history=%d thinking=%s",
+             LLAMACPP_URL, LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE, HISTORY_LIMIT, LLM_ENABLE_THINKING)
     log.info("Config — triggers: volume=%d length=%d silence=%dmin",
              VOLUME_TRIGGER_N, LENGTH_TRIGGER_CHARS, SILENCE_TRIGGER_MINUTES)
     log.debug("System prompt: %s", SYSTEM_PROMPT)
