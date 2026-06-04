@@ -54,6 +54,14 @@ LLM_MODEL            = os.getenv("LLM_MODEL", "local-model")
 LLM_MAX_TOKENS       = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE      = float(os.getenv("LLM_TEMPERATURE", "0.85"))
 
+# HTTP timeout for LLM requests.
+# Connect timeout is kept short (fast failure when the server is unreachable).
+# Read timeout must accommodate slow CPU inference: a 1 k-token response at
+# ~10 t/s with a 1 k-token prompt at ~30 t/s needs ≈ 130 s; 600 s gives ample
+# headroom for longer exchanges.  Set LLM_TIMEOUT=0 to disable the read timeout.
+LLM_CONNECT_TIMEOUT  = float(os.getenv("LLM_CONNECT_TIMEOUT", "10"))
+LLM_TIMEOUT          = float(os.getenv("LLM_TIMEOUT", "600"))
+
 # The system persona prepended to every prompt.
 # Keep it on a single line in .env; use \n for newlines if needed.
 _DEFAULT_SYSTEM_PROMPT = (
@@ -200,10 +208,16 @@ async def generate_and_send(
         # ── POST to llama.cpp (fully async — does NOT block heartbeat) ──
         # Include Authorization header only when an API key is configured.
         headers = {"Authorization": f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {}
-        log.info("POSTing to %s (timeout=300s, max_tokens=%d) …",
-                 LLAMACPP_URL, LLM_MAX_TOKENS)
+        log.info("POSTing to %s (connect_timeout=%.0fs, read_timeout=%.0fs, max_tokens=%d) …",
+                 LLAMACPP_URL, LLM_CONNECT_TIMEOUT, LLM_TIMEOUT, LLM_MAX_TOKENS)
         t_request = datetime.datetime.now(datetime.timezone.utc)
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        _timeout = httpx.Timeout(
+            connect=LLM_CONNECT_TIMEOUT,
+            read=LLM_TIMEOUT or None,   # 0 → None → no read timeout
+            write=60.0,
+            pool=5.0,
+        )
+        async with httpx.AsyncClient(timeout=_timeout) as client:
             response = await client.post(LLAMACPP_URL, json=payload, headers=headers)
 
         t_response = datetime.datetime.now(datetime.timezone.utc)
@@ -261,8 +275,8 @@ async def generate_and_send(
 
     except httpx.TimeoutException as exc:
         elapsed = (datetime.datetime.now(datetime.timezone.utc) - t_start).total_seconds()
-        log.error("llama.cpp request timed out after %.1fs (timeout=300s): %r",
-                  elapsed, exc)
+        log.error("llama.cpp request timed out after %.1fs (read_timeout=%.0fs): %r",
+                  elapsed, LLM_TIMEOUT, exc)
     except httpx.HTTPStatusError as exc:
         log.error("llama.cpp HTTP error %s — response body: %s",
                   exc.response.status_code, exc.response.text[:500],
