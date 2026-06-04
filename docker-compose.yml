@@ -1,0 +1,31 @@
+services:
+  tae-llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: tae-llama-server
+    restart: unless-stopped
+    environment:
+      - LLAMA_ARG_MODEL=/models/${LLAMA_MODEL}
+      - LLAMA_ARG_CTX_SIZE=${LLAMA_CTX_SIZE:-8192}
+      - LLAMA_ARG_THREADS=${LLAMA_THREADS:-5}
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+    volumes:
+      - ./models:/models
+    networks:
+      - tae-ai-network
+
+  discord-bot:
+    build: .
+    container_name: discord-bot
+    restart: unless-stopped
+    env_file: .env
+    # LLAMACPP_URL defaults to http://llama-server:8080/v1/chat/completions
+    # which resolves correctly over the shared ai-network bridge.
+    depends_on:
+      - tae-llama-server
+    networks:
+      - tae-ai-network
+
+networks:
+  tae-ai-network:
+    driver: bridge
