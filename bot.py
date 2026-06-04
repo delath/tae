@@ -127,33 +127,45 @@ async def generate_and_send(
         return
 
     is_generating = True
-    log.info("Generation triggered by: %s", reason)
+    t_start = datetime.datetime.now(datetime.timezone.utc)
+    log.info("[%s] Generation triggered by: %s", t_start.strftime("%H:%M:%S"), reason)
 
     try:
         # ── Fetch message history (stateless; fresh every call) ────
         # discord.py v2 removed .flatten(); use an async comprehension instead.
         # history() yields newest-first, so reverse for chronological order.
+        log.debug("Fetching up to %d messages from channel #%s (%d).",
+                  HISTORY_LIMIT, channel.name, channel.id)
         raw_history = [msg async for msg in channel.history(limit=HISTORY_LIMIT)]
         chronological = list(reversed(raw_history))
+        log.debug("Fetched %d raw messages from Discord.", len(chronological))
 
         # ── Build OpenAI-schema messages array ────────────────────
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
 
+        skipped_empty = 0
+        skipped_self  = 0
         for msg in chronological:
             # Skip empty messages (images-only, stickers, etc.)
             if not msg.content.strip():
+                skipped_empty += 1
                 continue
 
             # Skip messages sent by this bot to avoid self-referential loops
             if msg.author.id == bot.user.id:
+                skipped_self += 1
                 continue
 
             messages.append({
                 "role": "user",
                 "content": f"{msg.author.display_name}: {msg.content}",
             })
+
+        user_msgs = len(messages) - 1  # exclude system prompt
+        log.info("History built: %d user messages included, %d empty skipped, "
+                 "%d self skipped.", user_msgs, skipped_empty, skipped_self)
 
         # Guard: if there's nothing but the system prompt, bail out
         if len(messages) == 1:
@@ -164,13 +176,13 @@ async def generate_and_send(
         # so the LLM focuses its reply on that specific message rather than
         # producing a generic observation about the whole conversation.
         if reply_to is not None:
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"[The last message from {reply_to.author.display_name} was "
-                    f"unusually long. React to it specifically and concisely.]"
-                ),
-            })
+            nudge = (
+                f"[The last message from {reply_to.author.display_name} was "
+                f"unusually long. React to it specifically and concisely.]"
+            )
+            messages.append({"role": "user", "content": nudge})
+            log.debug("Appended length-nudge for message from %s (%d chars).",
+                      reply_to.author.display_name, len(reply_to.content))
 
         payload = {
             "model":       LLM_MODEL,
@@ -179,43 +191,95 @@ async def generate_and_send(
             "temperature": LLM_TEMPERATURE,
         }
 
+        log.debug("Payload: model=%s, messages=%d, max_tokens=%d, temperature=%.2f",
+                  LLM_MODEL, len(messages), LLM_MAX_TOKENS, LLM_TEMPERATURE)
+        log.debug("System prompt (%d chars): %.120s%s",
+                  len(SYSTEM_PROMPT), SYSTEM_PROMPT,
+                  "..." if len(SYSTEM_PROMPT) > 120 else "")
+
         # ── POST to llama.cpp (fully async — does NOT block heartbeat) ──
         # Include Authorization header only when an API key is configured.
         headers = {"Authorization": f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {}
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            log.info("Sending %d messages to llama.cpp...", len(messages))
+        log.info("POSTing to %s (timeout=300s, max_tokens=%d) …",
+                 LLAMACPP_URL, LLM_MAX_TOKENS)
+        t_request = datetime.datetime.now(datetime.timezone.utc)
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(LLAMACPP_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+
+        t_response = datetime.datetime.now(datetime.timezone.utc)
+        elapsed_req = (t_response - t_request).total_seconds()
+        log.info("llama.cpp responded: HTTP %d in %.1fs.",
+                 response.status_code, elapsed_req)
+
+        response.raise_for_status()
+        data = response.json()
+
+        # Log usage stats when the server returns them
+        usage = data.get("usage", {})
+        if usage:
+            log.info("Token usage — prompt: %s, completion: %s, total: %s.",
+                     usage.get("prompt_tokens", "?"),
+                     usage.get("completion_tokens", "?"),
+                     usage.get("total_tokens", "?"))
+
+        finish_reason = data.get("choices", [{}])[0].get("finish_reason", "unknown")
+        log.info("Finish reason: %s.", finish_reason)
+        if finish_reason == "length":
+            log.warning("Model hit max_tokens (%d) — reply may be truncated. "
+                        "Consider raising LLM_MAX_TOKENS.", LLM_MAX_TOKENS)
 
         # Extract the assistant's reply from the standard OpenAI response shape.
         # Thinking models (e.g. Qwen3) may wrap chain-of-thought in <think>…</think>
         # before the actual response. Strip those blocks before checking for content.
         raw_content: str = data["choices"][0]["message"]["content"] or ""
+        log.debug("Raw content from llama.cpp (%d chars): %.200s%s",
+                  len(raw_content), raw_content,
+                  "..." if len(raw_content) > 200 else "")
+
+        think_blocks = re.findall(r"<think>[\s\S]*?</think>", raw_content)
+        if think_blocks:
+            total_think_chars = sum(len(b) for b in think_blocks)
+            log.info("Stripped %d <think> block(s) totalling %d chars.",
+                     len(think_blocks), total_think_chars)
+
         reply_text: str = re.sub(r"<think>[\s\S]*?</think>", "", raw_content).strip()
+        log.debug("Reply after stripping (%d chars): %.200s%s",
+                  len(reply_text), reply_text,
+                  "..." if len(reply_text) > 200 else "")
 
         if not reply_text:
-            log.warning("llama.cpp returned an empty reply; skipping send.")
+            log.warning("llama.cpp returned an empty reply after stripping think "
+                        "blocks; raw content was %d chars. Full raw: %r",
+                        len(raw_content), raw_content[:500])
             return
 
-        log.info("Sending reply (%d chars).", len(reply_text))
+        log.info("Sending reply (%d chars) to #%s.", len(reply_text), channel.name)
         if reply_to is not None:
             await reply_to.reply(reply_text)
         else:
             await channel.send(reply_text)
 
+    except httpx.TimeoutException as exc:
+        elapsed = (datetime.datetime.now(datetime.timezone.utc) - t_start).total_seconds()
+        log.error("llama.cpp request timed out after %.1fs (timeout=300s): %r",
+                  elapsed, exc)
     except httpx.HTTPStatusError as exc:
-        log.error("llama.cpp HTTP error %s: %s", exc.response.status_code, exc)
+        log.error("llama.cpp HTTP error %s — response body: %s",
+                  exc.response.status_code, exc.response.text[:500],
+                  exc_info=True)
     except httpx.RequestError as exc:
-        log.error("llama.cpp request failed: %s", exc)
+        log.error("llama.cpp request failed (%s): %r", type(exc).__name__, exc,
+                  exc_info=True)
     except (KeyError, IndexError) as exc:
-        log.error("Unexpected llama.cpp response shape: %s", exc)
+        log.error("Unexpected llama.cpp response shape: %r — data dump: %r",
+                  exc, str(data)[:500] if 'data' in dir() else '<no data>',
+                  exc_info=True)
     except discord.HTTPException as exc:
-        log.error("Discord send failed: %s", exc)
+        log.error("Discord send failed (status %s): %s", exc.status, exc, exc_info=True)
     finally:
-        # Always release the lock, even if something exploded
+        elapsed_total = (datetime.datetime.now(datetime.timezone.utc) - t_start).total_seconds()
         is_generating = False
-        log.info("Generation complete; lock released.")
+        log.info("Generation complete in %.1fs; lock released.", elapsed_total)
 
 
 # ──────────────────────────────────────────────
@@ -227,6 +291,11 @@ async def on_ready() -> None:
     """Called once the bot has connected and its internal cache is ready."""
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     log.info("Watching channel ID: %s", TARGET_CHANNEL_ID)
+    log.info("Config — LLM: url=%s model=%s max_tokens=%d temperature=%.2f history=%d",
+             LLAMACPP_URL, LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE, HISTORY_LIMIT)
+    log.info("Config — triggers: volume=%d length=%d silence=%dmin",
+             VOLUME_TRIGGER_N, LENGTH_TRIGGER_CHARS, SILENCE_TRIGGER_MINUTES)
+    log.debug("System prompt: %s", SYSTEM_PROMPT)
 
     # Start the background silence-check loop now that we have a valid session.
     # Guard against accidental double-start (e.g. reconnects).
