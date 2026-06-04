@@ -177,8 +177,8 @@ async def generate_and_send(
         # producing a generic observation about the whole conversation.
         if reply_to is not None:
             nudge = (
-                f"[The last message from {reply_to.author.display_name} was "
-                f"unusually long. React to it specifically and concisely.]"
+                f"[L'ultimo messaggio di {reply_to.author.display_name} era "
+                f"insolitamente lungo. Reagisci ad esso in modo specifico e conciso.]"
             )
             messages.append({"role": "user", "content": nudge})
             log.debug("Appended length-nudge for message from %s (%d chars).",
