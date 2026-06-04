@@ -11,6 +11,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 
 import discord
 import httpx
@@ -50,7 +51,7 @@ SILENCE_TRIGGER_MINUTES = int(os.getenv("SILENCE_TRIGGER_MINUTES", "60"))
 # llama.cpp ignores this; set to a real name for hosted APIs ("gpt-4o", etc.).
 LLM_MODEL            = os.getenv("LLM_MODEL", "local-model")
 
-LLM_MAX_TOKENS       = int(os.getenv("LLM_MAX_TOKENS", "256"))
+LLM_MAX_TOKENS       = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE      = float(os.getenv("LLM_TEMPERATURE", "0.85"))
 
 # The system persona prepended to every prompt.
@@ -187,10 +188,11 @@ async def generate_and_send(
             response.raise_for_status()
             data = response.json()
 
-        # Extract the assistant's reply from the standard OpenAI response shape
-        reply_text: str = (
-            data["choices"][0]["message"]["content"].strip()
-        )
+        # Extract the assistant's reply from the standard OpenAI response shape.
+        # Thinking models (e.g. Qwen3) may wrap chain-of-thought in <think>…</think>
+        # before the actual response. Strip those blocks before checking for content.
+        raw_content: str = data["choices"][0]["message"]["content"] or ""
+        reply_text: str = re.sub(r"<think>[\s\S]*?</think>", "", raw_content).strip()
 
         if not reply_text:
             log.warning("llama.cpp returned an empty reply; skipping send.")
